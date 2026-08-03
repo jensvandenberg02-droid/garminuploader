@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Knokke 70.3 — Workout uploader</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="card">
+    <p class="eyebrow">Ironman 70.3 Knokke &middot; 6 sep 2026</p>
+    <h1>Workouts naar Garmin</h1>
+    <p class="lead">
+      {{ run_count }} loop- en {{ swim_count }} zwemworkouts, elk met de juiste
+      hartslag- of CSS-snelheidszone, worden aangemaakt en meteen op de juiste
+      dag in je kalender gepland.
+    </p>
+
+    <form id="uploadForm">
+      <label for="email">Garmin e-mailadres</label>
+      <input type="email" id="email" name="email" required autocomplete="username">
+
+      <label for="password">Garmin wachtwoord</label>
+      <input type="password" id="password" name="password" required autocomplete="current-password">
+
+      <label for="mfa_code">MFA-code <span class="optional">(alleen als gevraagd)</span></label>
+      <input type="text" id="mfa_code" name="mfa_code" autocomplete="one-time-code">
+
+      <button type="submit" id="submitBtn">Upload &amp; plan alle workouts</button>
+    </form>
+
+    <p class="note">
+      Je wachtwoord wordt nergens opgeslagen — het gaat rechtstreeks van deze
+      pagina naar je lokale server, en die stuurt het één keer door naar Garmin
+      om in te loggen. Draai dit alleen lokaal op je eigen machine.
+    </p>
+
+    <div id="results" class="results" hidden>
+      <h2>Resultaat</h2>
+      <ul id="resultsList"></ul>
+    </div>
+  </main>
+
+<script>
+const form = document.getElementById('uploadForm');
+const btn = document.getElementById('submitBtn');
+const resultsBox = document.getElementById('results');
+const resultsList = document.getElementById('resultsList');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  btn.disabled = true;
+  btn.textContent = 'Bezig...';
+  resultsBox.hidden = true;
+  resultsList.innerHTML = '';
+
+  try {
+    const res = await fetch('/upload', { method: 'POST', body: new FormData(form) });
+    const data = await res.json();
+
+    if (data.error) {
+      resultsList.innerHTML = `<li class="fail">${data.error}</li>`;
+    } else {
+      data.results.forEach(r => {
+        const li = document.createElement('li');
+        li.className = r.status === 'ok' ? 'ok' : 'fail';
+        li.textContent = `${r.date} — ${r.name} — ${r.status}`;
+        resultsList.appendChild(li);
+      });
+    }
+    resultsBox.hidden = false;
+  } catch (err) {
+    resultsList.innerHTML = `<li class="fail">Netwerkfout: ${err}</li>`;
+    resultsBox.hidden = false;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Upload & plan alle workouts';
+    document.getElementById('password').value = '';
+  }
+});
+</script>
+</body>
+</html>
