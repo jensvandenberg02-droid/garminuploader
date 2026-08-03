@@ -1,3 +1,4 @@
 flask>=3.0
 garminconnect>=0.2.30
 pydantic>=2.0
+gunicorn>=21.0
