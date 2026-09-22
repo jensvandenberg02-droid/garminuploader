@@ -2,80 +2,97 @@
 <html lang="nl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Knokke 70.3 — Workout uploader</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garmin Workout Uploader</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 1.4rem; }
+  fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  legend { padding: 0 6px; font-weight: 600; }
+  label { display: block; margin-top: 10px; font-size: 0.9rem; }
+  input[type=email], input[type=password], input[type=text] {
+    width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box;
+    border: 1px solid #ccc; border-radius: 6px;
+  }
+  input[type=file] { margin-top: 6px; }
+  button { margin-top: 16px; padding: 10px 18px; border: 0; border-radius: 6px; background: #0b6; color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #aaa; cursor: default; }
+  .hint { font-size: 0.8rem; color: #666; margin-top: 4px; }
+  .default-plan { font-size: 0.85rem; color: #444; background: #f6f6f6; padding: 10px 12px; border-radius: 6px; }
+  #log { margin-top: 20px; font-size: 0.85rem; }
+  #log .ok { color: #0a0; }
+  #log .fout { color: #c00; }
+  #error { color: #c00; margin-top: 10px; font-size: 0.9rem; }
+</style>
 </head>
 <body>
-  <main class="card">
-    <p class="eyebrow">Ironman 70.3 Knokke &middot; 6 sep 2026</p>
-    <h1>Workouts naar Garmin</h1>
-    <p class="lead">
-      {{ run_count }} loop- en {{ swim_count }} zwemworkouts, elk met de juiste
-      hartslag- of CSS-snelheidszone, worden aangemaakt en meteen op de juiste
-      dag in je kalender gepland.
-    </p>
+  <h1>Garmin Workout Uploader</h1>
 
-    <form id="uploadForm">
-      <label for="email">Garmin e-mailadres</label>
+  <div class="default-plan">
+    Standaardplan in de code: {{ run_count }} loopworkouts, {{ swim_count }} zwemworkouts.
+    Upload hieronder je eigen JSON-bestand om dat plan te overschrijven — anders wordt het standaardplan gebruikt.
+  </div>
+
+  <form id="uploadForm">
+    <fieldset>
+      <legend>Eigen workout-plan (optioneel)</legend>
+      <label for="workouts_file">JSON-bestand</label>
+      <input type="file" id="workouts_file" name="workouts_file" accept="application/json,.json">
+      <div class="hint">Leeg laten = standaardplan uit workouts_data.py gebruiken.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Garmin-login</legend>
+      <label for="email">E-mail</label>
       <input type="email" id="email" name="email" required autocomplete="username">
 
-      <label for="password">Garmin wachtwoord</label>
+      <label for="password">Wachtwoord</label>
       <input type="password" id="password" name="password" required autocomplete="current-password">
 
-      <label for="mfa_code">MFA-code <span class="optional">(alleen als gevraagd)</span></label>
+      <label for="mfa_code">MFA-code (indien van toepassing)</label>
       <input type="text" id="mfa_code" name="mfa_code" autocomplete="one-time-code">
+    </fieldset>
 
-      <button type="submit" id="submitBtn">Upload &amp; plan alle workouts</button>
-    </form>
+    <button type="submit" id="submitBtn">Upload naar Garmin</button>
+  </form>
 
-    <p class="note">
-      Je wachtwoord wordt nergens opgeslagen — het gaat rechtstreeks van deze
-      pagina naar je lokale server, en die stuurt het één keer door naar Garmin
-      om in te loggen. Draai dit alleen lokaal op je eigen machine.
-    </p>
-
-    <div id="results" class="results" hidden>
-      <h2>Resultaat</h2>
-      <ul id="resultsList"></ul>
-    </div>
-  </main>
+  <div id="error"></div>
+  <div id="log"></div>
 
 <script>
 const form = document.getElementById('uploadForm');
-const btn = document.getElementById('submitBtn');
-const resultsBox = document.getElementById('results');
-const resultsList = document.getElementById('resultsList');
+const submitBtn = document.getElementById('submitBtn');
+const errorBox = document.getElementById('error');
+const logBox = document.getElementById('log');
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  btn.disabled = true;
-  btn.textContent = 'Bezig...';
-  resultsBox.hidden = true;
-  resultsList.innerHTML = '';
+  errorBox.textContent = '';
+  logBox.innerHTML = '';
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Bezig met uploaden…';
+
+  const formData = new FormData(form);
 
   try {
-    const res = await fetch('/upload', { method: 'POST', body: new FormData(form) });
+    const res = await fetch('/upload', { method: 'POST', body: formData });
     const data = await res.json();
 
-    if (data.error) {
-      resultsList.innerHTML = `<li class="fail">${data.error}</li>`;
-    } else {
-      data.results.forEach(r => {
-        const li = document.createElement('li');
-        li.className = r.status === 'ok' ? 'ok' : 'fail';
-        li.textContent = `${r.date} — ${r.name} — ${r.status}`;
-        resultsList.appendChild(li);
-      });
+    if (!res.ok) {
+      errorBox.textContent = data.error || 'Er ging iets mis.';
+      return;
     }
-    resultsBox.hidden = false;
+
+    logBox.innerHTML = data.results.map(r => {
+      const cls = r.status === 'ok' ? 'ok' : 'fout';
+      return `<div class="${cls}">${r.date} — ${r.name}: ${r.status}</div>`;
+    }).join('');
   } catch (err) {
-    resultsList.innerHTML = `<li class="fail">Netwerkfout: ${err}</li>`;
-    resultsBox.hidden = false;
+    errorBox.textContent = 'Netwerkfout: ' + err.message;
   } finally {
-    btn.disabled = false;
-    btn.textContent = 'Upload & plan alle workouts';
-    document.getElementById('password').value = '';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Upload naar Garmin';
+    form.password.value = '';
   }
 });
 </script>
