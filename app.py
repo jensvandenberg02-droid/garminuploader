@@ -1,11 +1,30 @@
 """
-Kleine persoonlijke website: log in met je eigen Garmin-account en upload/plan
-in één klik alle 19 loop- en zwemworkouts naar Garmin Connect.
+Kleine persoonlijke website: log in met je eigen Garmin-account, upload een
+workouts.json-bestand, en plan in één klik alle loop- en zwemworkouts naar
+Garmin Connect.
 
 Draai lokaal:
     pip install -r requirements.txt
     python3 app.py
 Open dan http://127.0.0.1:5000 in je browser.
+
+WORKOUTS.JSON FORMAAT:
+{
+  "run_hr_zones":  {"recovery": [126, 142], "easy": [143, 157], "tempo": [158, 173],
+                     "race": [174, 188], "hard": [188, 204]},
+  "swim_hr_zones": {"z1": [115, 130], "z2": [130, 145], "z3": [145, 160],
+                     "z4": [160, 175], "z5": [175, 202]},
+  "run_workouts": [
+    {"name": "23/09/2026 - Loop rustig zone 2", "date": "2026-09-23",
+     "steps": [{"kind": "active", "meters": 7800, "zone": "easy"}]}
+  ],
+  "swim_workouts": [
+    {"name": "22/09/2026 - Zwem rustig", "date": "2026-09-22",
+     "meters": 1800, "zone": "z2"}
+  ]
+}
+Elke maand genereer je gewoon een nieuw workouts.json en upload je dat hier —
+er hoeft niets meer aangepast te worden aan deze code of op GitHub/Render.
 
 BELANGRIJK:
 - Dit gebruikt de niet-officiële, community-onderhouden library `garminconnect`
@@ -19,11 +38,12 @@ BELANGRIJK:
   keer opnieuw hoeft in te loggen.
 - Draai dit ALLEEN lokaal op je eigen machine (of eventueel op een privé
   server die alleen jij kan bereiken). Zet dit nooit online toegankelijk
-  zonder extra beveiliging (dit is bewust een 1-persoons-toolt je, geen
+  zonder extra beveiliging (dit is bewust een 1-persoons-tooltje, geen
   publieke webapp) — anders kan iemand anders jouw Garmin-inloggegevens
   onderscheppen.
 """
 
+import json
 import os
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, Response
@@ -37,8 +57,6 @@ from garminconnect.workout import (
     ConditionType,
     TargetType,
 )
-
-from workouts_data import HR, SWIM_HR, RUN_WORKOUTS, SWIM_WORKOUTS
 
 app = Flask(__name__)
 
@@ -112,20 +130,21 @@ def make_distance_step(step_order, kind, meters, low=None, high=None):
     )
 
 
-def build_run_steps(step_defs):
+def build_run_steps(step_defs, run_hr_zones):
     steps = []
-    for i, (kind, meters, zone) in enumerate(step_defs, start=1):
-        low, high = HR[zone]
-        steps.append(make_distance_step(i, kind, meters, low, high))
+    for i, step in enumerate(step_defs, start=1):
+        zone = step.get("zone")
+        low, high = (None, None)
+        if zone:
+            low, high = run_hr_zones[zone]
+        steps.append(make_distance_step(i, step["kind"], step["meters"], low, high))
     return steps
 
 
 @app.route("/")
 @require_site_login
 def index():
-    return render_template("index.html",
-                            run_count=len(RUN_WORKOUTS),
-                            swim_count=len(SWIM_WORKOUTS))
+    return render_template("index.html")
 
 
 @app.route("/upload", methods=["POST"])
@@ -134,9 +153,22 @@ def upload():
     email = request.form.get("email")
     password = request.form.get("password")
     mfa_code = request.form.get("mfa_code") or None
+    workouts_file = request.files.get("workouts_file")
 
     if not email or not password:
         return jsonify({"error": "E-mail en wachtwoord zijn verplicht."}), 400
+    if not workouts_file:
+        return jsonify({"error": "Geen workouts.json geüpload."}), 400
+
+    try:
+        data = json.load(workouts_file.stream)
+    except Exception as e:
+        return jsonify({"error": f"Kon workouts.json niet lezen: {e}"}), 400
+
+    run_hr_zones = data.get("run_hr_zones", {})
+    swim_hr_zones = data.get("swim_hr_zones", {})
+    run_workouts = data.get("run_workouts", [])
+    swim_workouts = data.get("swim_workouts", [])
 
     log = []
     try:
@@ -148,29 +180,38 @@ def upload():
         # wachtwoord expliciet uit het geheugen halen, we hebben het niet meer nodig
         password = None
 
-    # 13 loopworkouts
-    for name, date_str, step_defs in RUN_WORKOUTS:
+    # loopworkouts
+    for w in run_workouts:
+        name = w.get("name", "Naamloze loopworkout")
+        date_str = w.get("date")
         try:
             workout = RunningWorkout(
                 workoutName=name,
                 estimatedDurationInSecs=0,
                 workoutSegments=[WorkoutSegment(segmentOrder=1, sportType=RUN_SPORT,
-                                                 workoutSteps=build_run_steps(step_defs))],
+                                                 workoutSteps=build_run_steps(w["steps"], run_hr_zones))],
             )
             result = client.upload_running_workout(workout)
             workout_id = result.get("workoutId") or result.get("workoutSummary", {}).get("workoutId")
-            if workout_id:
+            if workout_id and date_str:
                 client.schedule_workout(workout_id, date_str)
             log.append({"name": name, "date": date_str, "status": "ok"})
         except Exception as e:
             log.append({"name": name, "date": date_str, "status": f"fout: {e}"})
 
     # zwemworkouts
-    for name, date_str, meters, zone in SWIM_WORKOUTS:
+    for w in swim_workouts:
+        name = w.get("name", "Naamloze zwemworkout")
+        date_str = w.get("date")
         try:
-            wu_low, wu_high = SWIM_HR["z1"]
-            active_low, active_high = SWIM_HR[zone]
-            cd_low, cd_high = SWIM_HR["z1"]
+            meters = w["meters"]
+            zone = w.get("zone")
+            if zone and zone in swim_hr_zones:
+                wu_low, wu_high = swim_hr_zones["z1"] if "z1" in swim_hr_zones else (None, None)
+                active_low, active_high = swim_hr_zones[zone]
+                cd_low, cd_high = swim_hr_zones["z1"] if "z1" in swim_hr_zones else (None, None)
+            else:
+                wu_low = wu_high = active_low = active_high = cd_low = cd_high = None
             steps = [
                 make_distance_step(1, "warmup", 400, wu_low, wu_high),
                 make_distance_step(2, "active", meters - 400, active_low, active_high),
@@ -183,7 +224,7 @@ def upload():
             )
             result = client.upload_swimming_workout(workout)
             workout_id = result.get("workoutId") or result.get("workoutSummary", {}).get("workoutId")
-            if workout_id:
+            if workout_id and date_str:
                 client.schedule_workout(workout_id, date_str)
             log.append({"name": name, "date": date_str, "status": "ok"})
         except Exception as e:
