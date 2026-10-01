@@ -8,7 +8,7 @@ Draai lokaal:
     python3 app.py
 Open dan http://127.0.0.1:5000 in je browser.
 
-WORKOUTS.JSON FORMAAT:
+WORKOUTS.JSON FORMAAT (elke stap/sessie kan op tijd óf op afstand eindigen):
 {
   "run_hr_zones":  {"recovery": [126, 142], "easy": [143, 157], "tempo": [158, 173],
                      "race": [174, 188], "hard": [188, 204]},
@@ -16,13 +16,17 @@ WORKOUTS.JSON FORMAAT:
                      "z4": [160, 175], "z5": [175, 202]},
   "run_workouts": [
     {"name": "23/09/2026 - Loop rustig zone 2", "date": "2026-09-23",
-     "steps": [{"kind": "active", "meters": 7800, "zone": "easy"}]}
+     "steps": [{"kind": "active", "seconds": 2700, "zone": "easy"}]}
   ],
   "swim_workouts": [
     {"name": "22/09/2026 - Zwem rustig", "date": "2026-09-22",
      "meters": 1800, "zone": "z2"}
   ]
 }
+Per loopstap: geef ofwel "seconds" (tijd-gebaseerd) ofwel "meters" (afstand-gebaseerd) —
+precies één van de twee. Per zwemworkout hetzelfde: ofwel "seconds" ofwel "meters" op
+workout-niveau. Mix gerust binnen eenzelfde maand: de ene sessie op tijd, de andere op
+afstand, net wat het beste past.
 Elke maand genereer je gewoon een nieuw workouts.json en upload je dat hier —
 er hoeft niets meer aangepast te worden aan deze code of op GitHub/Render.
 
@@ -98,9 +102,27 @@ STEP_TYPE_IDS = {
 }
 
 
-def make_distance_step(step_order, kind, meters, low=None, high=None):
-    """Bouwt een stap die eindigt op afstand (meters), optioneel met een
-    hartslagzone (low/high in bpm) als target."""
+def _end_condition_and_value(meters=None, seconds=None):
+    """Geeft de endCondition-dict + waarde terug, op afstand of op tijd
+    naargelang welke van de twee is meegegeven (precies één verwacht)."""
+    if seconds is not None:
+        return {
+            "conditionTypeId": ConditionType.TIME,
+            "conditionTypeKey": "time",
+            "displayOrder": 2,
+            "displayable": True,
+        }, float(seconds)
+    return {
+        "conditionTypeId": ConditionType.DISTANCE,
+        "conditionTypeKey": "distance",
+        "displayOrder": 3,
+        "displayable": True,
+    }, float(meters)
+
+
+def make_step(step_order, kind, low=None, high=None, meters=None, seconds=None):
+    """Bouwt een stap die eindigt op afstand (meters) of op tijd (seconds) —
+    geef precies één van de twee mee. Optioneel een hartslagzone (low/high)."""
     type_id, type_key = STEP_TYPE_IDS[kind]
     if low is not None and high is not None:
         target_type = {
@@ -114,16 +136,12 @@ def make_distance_step(step_order, kind, meters, low=None, high=None):
             "workoutTargetTypeKey": "no.target",
             "displayOrder": 1,
         }
+    end_condition, end_value = _end_condition_and_value(meters=meters, seconds=seconds)
     return ExecutableStep(
         stepOrder=step_order,
         stepType={"stepTypeId": type_id, "stepTypeKey": type_key, "displayOrder": 1},
-        endCondition={
-            "conditionTypeId": ConditionType.DISTANCE,
-            "conditionTypeKey": "distance",
-            "displayOrder": 3,
-            "displayable": True,
-        },
-        endConditionValue=float(meters),
+        endCondition=end_condition,
+        endConditionValue=end_value,
         targetType=target_type,
         targetValueOne=low,
         targetValueTwo=high,
@@ -137,7 +155,10 @@ def build_run_steps(step_defs, run_hr_zones):
         low, high = (None, None)
         if zone:
             low, high = run_hr_zones[zone]
-        steps.append(make_distance_step(i, step["kind"], step["meters"], low, high))
+        steps.append(make_step(
+            i, step["kind"], low, high,
+            meters=step.get("meters"), seconds=step.get("seconds"),
+        ))
     return steps
 
 
@@ -204,7 +225,6 @@ def upload():
         name = w.get("name", "Naamloze zwemworkout")
         date_str = w.get("date")
         try:
-            meters = w["meters"]
             zone = w.get("zone")
             if zone and zone in swim_hr_zones:
                 wu_low, wu_high = swim_hr_zones["z1"] if "z1" in swim_hr_zones else (None, None)
@@ -212,11 +232,22 @@ def upload():
                 cd_low, cd_high = swim_hr_zones["z1"] if "z1" in swim_hr_zones else (None, None)
             else:
                 wu_low = wu_high = active_low = active_high = cd_low = cd_high = None
-            steps = [
-                make_distance_step(1, "warmup", 400, wu_low, wu_high),
-                make_distance_step(2, "active", meters - 400, active_low, active_high),
-                make_distance_step(3, "cooldown", 200, cd_low, cd_high),
-            ]
+
+            if "seconds" in w:
+                warmup_s, cooldown_s = 300, 120  # 5 min inzwemmen, 2 min uitzwemmen
+                active_s = max(w["seconds"] - warmup_s - cooldown_s, 60)
+                steps = [
+                    make_step(1, "warmup", wu_low, wu_high, seconds=warmup_s),
+                    make_step(2, "active", active_low, active_high, seconds=active_s),
+                    make_step(3, "cooldown", cd_low, cd_high, seconds=cooldown_s),
+                ]
+            else:
+                meters = w["meters"]
+                steps = [
+                    make_step(1, "warmup", wu_low, wu_high, meters=400),
+                    make_step(2, "active", active_low, active_high, meters=meters - 400),
+                    make_step(3, "cooldown", cd_low, cd_high, meters=200),
+                ]
             workout = SwimmingWorkout(
                 workoutName=name,
                 estimatedDurationInSecs=0,
