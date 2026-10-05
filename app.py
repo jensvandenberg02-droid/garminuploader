@@ -20,11 +20,14 @@ WORKOUTS.JSON FORMAAT (elke stap/sessie kan op tijd óf op afstand eindigen):
   ],
   "swim_workouts": [
     {"name": "22/09/2026 - Zwem rustig", "date": "2026-09-22",
-     "meters": 1800, "zone": "z2"}
+     "meters": 1800, "zone": "z2", "pool_length_m": 25}
   ]
 }
+Zwem op afstand: "meters" is het TOTAAL (inclusief 400 m in- en 200 m uitzwemmen) en
+hoort een veelvoud van de baanlengte te zijn. "pool_length_m" is optioneel (standaard 25).
 Per loopstap: geef ofwel "seconds" (tijd-gebaseerd) ofwel "meters" (afstand-gebaseerd) —
-precies één van de twee. Per zwemworkout hetzelfde: ofwel "seconds" ofwel "meters" op
+precies één van de twee. Als doel per loopstap: "zone" (hartslagzone, bv. "easy" voor rustige
+en lange lopen) óf "pace": ["5:05", "5:15"] (tempo-venster in min/km, voor intervallen). Per zwemworkout hetzelfde: ofwel "seconds" ofwel "meters" op
 workout-niveau. Mix gerust binnen eenzelfde maand: de ene sessie op tijd, de andere op
 afstand, net wat het beste past.
 Elke maand genereer je gewoon een nieuw workouts.json en upload je dat hier —
@@ -120,11 +123,27 @@ def _end_condition_and_value(meters=None, seconds=None):
     }, float(meters)
 
 
-def make_step(step_order, kind, low=None, high=None, meters=None, seconds=None):
+def pace_to_mps(pace_str):
+    """'5:10' (min/km) -> snelheid in m/s, zoals Garmin tempo-doelen verwacht."""
+    minutes, seconds = pace_str.split(":")
+    return 1000.0 / (int(minutes) * 60 + int(seconds))
+
+
+def make_step(step_order, kind, low=None, high=None, meters=None, seconds=None, pace=None):
     """Bouwt een stap die eindigt op afstand (meters) of op tijd (seconds) —
-    geef precies één van de twee mee. Optioneel een hartslagzone (low/high)."""
+    geef precies één van de twee mee. Doel: een tempo-venster (pace = ["5:05", "5:15"],
+    snelste en traagste min/km) óf een hartslagzone (low/high in bpm), of geen doel."""
     type_id, type_key = STEP_TYPE_IDS[kind]
-    if low is not None and high is not None:
+    if pace:
+        # Garmin verwacht snelheden in m/s: targetValueOne = traagste, targetValueTwo = snelste
+        speeds = sorted((pace_to_mps(pace[0]), pace_to_mps(pace[1])))
+        low, high = speeds[0], speeds[1]
+        target_type = {
+            "workoutTargetTypeId": TargetType.PACE_ZONE,
+            "workoutTargetTypeKey": "pace.zone",
+            "displayOrder": 6,
+        }
+    elif low is not None and high is not None:
         target_type = {
             "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
             "workoutTargetTypeKey": "heart.rate.zone",
@@ -158,6 +177,7 @@ def build_run_steps(step_defs, run_hr_zones):
         steps.append(make_step(
             i, step["kind"], low, high,
             meters=step.get("meters"), seconds=step.get("seconds"),
+            pace=step.get("pace"),
         ))
     return steps
 
@@ -242,18 +262,35 @@ def upload():
                     make_step(3, "cooldown", cd_low, cd_high, seconds=cooldown_s),
                 ]
             else:
+                # Alle afstanden in veelvouden van de baanlengte (standaard 25 m).
+                # 400 m inzwemmen + 200 m uitzwemmen zitten IN het totaal (geen dubbele telling).
                 meters = w["meters"]
+                active_m = max(meters - 400 - 200, 100)
                 steps = [
                     make_step(1, "warmup", wu_low, wu_high, meters=400),
-                    make_step(2, "active", active_low, active_high, meters=meters - 400),
+                    make_step(2, "active", active_low, active_high, meters=active_m),
                     make_step(3, "cooldown", cd_low, cd_high, meters=200),
                 ]
-            workout = SwimmingWorkout(
-                workoutName=name,
-                estimatedDurationInSecs=0,
-                workoutSegments=[WorkoutSegment(segmentOrder=1, sportType=SWIM_SPORT, workoutSteps=steps)],
-            )
-            result = client.upload_swimming_workout(workout)
+
+            pool_m = float(w.get("pool_length_m", 25))
+            segments = [WorkoutSegment(segmentOrder=1, sportType=SWIM_SPORT, workoutSteps=steps)]
+            try:
+                workout = SwimmingWorkout(
+                    workoutName=name,
+                    estimatedDurationInSecs=0,
+                    workoutSegments=segments,
+                    poolLength=pool_m,
+                    poolLengthUnit={"unitId": 1, "unitKey": "meter", "factor": 100.0},
+                )
+                result = client.upload_swimming_workout(workout)
+            except Exception:
+                # Fallback zonder baanlengte-velden, mocht Garmin die weigeren
+                workout = SwimmingWorkout(
+                    workoutName=name,
+                    estimatedDurationInSecs=0,
+                    workoutSegments=segments,
+                )
+                result = client.upload_swimming_workout(workout)
             workout_id = result.get("workoutId") or result.get("workoutSummary", {}).get("workoutId")
             if workout_id and date_str:
                 client.schedule_workout(workout_id, date_str)
